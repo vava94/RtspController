@@ -1,0 +1,47 @@
+# Gradle build outputs
+build/
+.gradle/
+gradle/
+gradlew
+gradlew.bat
+gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local configuration
+local.properties
+gradle.properties.local
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+
+# Build artifacts
+*.apk
+*.aab
+*.jar
+*.aar
+*.class
+*.dex
+*.so
+
+# Kotlin
+.kotlin/
