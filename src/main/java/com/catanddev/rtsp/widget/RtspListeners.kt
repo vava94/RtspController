@@ -11,6 +11,7 @@ interface RtspStatusListener {
     fun onRtspStatusFailed(message: String?) {}
     fun onRtspFirstFrameRendered() {}
     fun onRtspFrameSizeChanged(width: Int, height: Int) {}
+    fun onRtspVideoSizeChanged(width: Int, height: Int, rotation: Int) {}
 }
 
 /**

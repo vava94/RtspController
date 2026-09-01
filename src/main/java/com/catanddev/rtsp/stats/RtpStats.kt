@@ -318,4 +318,58 @@ class RtpStats {
         stats.width = width
         stats.height = height
     }
+
+    /**
+     * Сбрасывает всю статистику
+     */
+    fun reset() {
+        synchronized(queueMutex) {
+            packets.clear()
+            frameIntervals.clear()
+            syncPoints.clear()
+            
+            jitter = 0.0
+            lastRtpTimestamp = 0
+            lastFrameTime = 0
+            lastFrameTimestamp = 0
+            clockRateLocked = false
+            frameCount = 0L
+            byteCount = 0L
+            lastFrameCount = 0L
+            lastPacketTime = 0L
+            lastCalculationTime = 0L
+            
+            gapCount = 0L
+            gapSumMs = 0.0
+            gapMaxMs = 0.0
+            gapMinMs = Double.MAX_VALUE
+            
+            lastSeq = 0
+            packetsLostTotal = 0
+            outOfOrderTotal = 0
+            currentBurst = 0
+            maxBurst = 0
+            firstPacket = true
+            totalPacketsReceived = 0L
+            
+            stats.apply {
+                fps = 0.0
+                bitrateMbps = 0.0
+                jitterMs = 0.0
+                packetsLost = 0
+                packetLossPercent = 0.0
+                outOfOrderPackets = 0
+                maxBurstLoss = 0
+                totalPacketsReceived = 0
+                bytesReceived = 0
+                inputBitrateMbps = 0.0
+                networkLatencyMs = 0.0
+                decodeLatencyMs = 0.0
+                totalLatencyMs = 0.0
+                packetGapAvgMs = 0.0
+                packetGapMaxMs = 0.0
+                packetGapMinMs = 0.0
+            }
+        }
+    }
 }

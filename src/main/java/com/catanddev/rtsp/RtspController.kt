@@ -2,6 +2,7 @@ package com.catanddev.rtsp
 
 
 import android.content.Context
+import android.media.MediaFormat
 import android.net.Uri
 import android.util.Log
 import android.view.Surface
@@ -33,6 +34,11 @@ class RtspController(
         RTP
     }
 
+    enum class VideoCodec {
+        H264,
+        H265
+    }
+
     var isInitialized = false
         private set
 
@@ -45,23 +51,21 @@ class RtspController(
     var currentViewHeight = viewHeight
         private set
 
+    var videoCodec = VideoCodec.H264
+        private set
+
     private var mRtspProcessor: RtspProcessor? = null
 
+    // Callback для синхронизации размеров с внешним view
+    var onVideoSizeChanged: ((width: Int, height: Int, rotation: Int) -> Unit)? = null
 
     init {
         MediaCodecHelper.initialize(context, /*glRenderer*/ "")
     }
 
-
     private fun mInitProcessor() {
-
         mRtspProcessor = RtspProcessor(
             onVideoDecoderCreateRequested = { videoMimeType, videoRotation, videoFrameQueue, videoDecoderListener, videoDecoderType, rtpStats ->
-                /**
-                 * Создаем Surface из SurfaceTexture для передачи в декодер.
-                 * Если Surface еще не готова, декодер создается без Surface (для получения метаданных).
-                 */
-
                 VideoDecoderSurfaceThread(
                     surface,
                     videoMimeType,
@@ -75,8 +79,14 @@ class RtspController(
                 )
             },
             frameHandler = frameHandler,
-
         )
+
+        // Настраиваем callback для синхронизации размеров
+        mRtspProcessor?.statusListener = object : com.catanddev.rtsp.widget.RtspStatusListener {
+            override fun onRtspVideoSizeChanged(width: Int, height: Int, rotation: Int) {
+                onVideoSizeChanged?.invoke(width, height, rotation)
+            }
+        }
     }
 
     fun initRTSP(address: Uri, username:String, password :String): Boolean {
@@ -84,7 +94,6 @@ class RtspController(
             Log.e(TAG,"Cannot initialize rtsp in rtp mode")
             return false
         }
-
 
         if (mRtspProcessor != null) {
             mRtspProcessor?.stop()
@@ -94,33 +103,60 @@ class RtspController(
 
         mInitProcessor()
 
-
         mRtspProcessor!!.init(address, username, password)
         return isInitialized
     }
 
     fun initRtp(bindAddress: String, port: UShort): Boolean {
-        if (mode == OPERATION_MODE.RTP) {
-            Log.e(TAG,"Cannot initialize rtsp in rtp mode")
+        if (mode != OPERATION_MODE.RTP) {
+            Log.e(TAG, "Cannot initialize RTP in RTSP mode")
             return false
         }
-        TODO("Not yet implemented")
-        return isInitialized
+
+        videoCodec = when (videoCodec) {
+            VideoCodec.H265 -> {
+                Log.i(TAG, "Initializing RTP with H.265 codec")
+                VideoCodec.H265
+            }
+            else -> {
+                Log.i(TAG, "Initializing RTP with H.264 codec")
+                VideoCodec.H264
+            }
+        }
+
+        if (mRtspProcessor != null) {
+            mRtspProcessor?.stop()
+            mRtspProcessor?.stopDecoders()
+            mRtspProcessor = null
+        }
+
+        mInitProcessor()
+
+        val mime = when (videoCodec) {
+            VideoCodec.H265 -> MediaFormat.MIMETYPE_VIDEO_HEVC
+            else -> MediaFormat.MIMETYPE_VIDEO_AVC
+        }
+
+        mRtspProcessor?.let {
+            it.initRtp(bindAddress, port.toInt(), when (videoCodec) {
+                VideoCodec.H265 -> RtspClient.VIDEO_CODEC_H265
+                else -> RtspClient.VIDEO_CODEC_H264
+            })
+            it.videoMimeType = mime
+        }
+
+        return true
     }
 
-    fun start(requestVideo: Boolean, requestAudio: Boolean, requestApplication: Boolean = false) {
-        if (mode == OPERATION_MODE.RTSP) {
-            mRtspProcessor?.start(requestVideo, requestAudio, requestApplication)
-            isActive = true
-        }
+    fun start(requestVideo: Boolean = true, requestAudio: Boolean = false, requestApplication: Boolean = false) {
+        mRtspProcessor?.start(requestVideo, requestAudio, requestApplication)
+        isActive = true
     }
 
     fun stop() {
-        if (mode == OPERATION_MODE.RTSP) {
-            mRtspProcessor?.stop()
-            mRtspProcessor?.stopDecoders()
-            isActive = false
-        }
+        mRtspProcessor?.stop()
+        mRtspProcessor?.stopDecoders()
+        isActive = false
     }
 
     fun getStats(): RtpStats? {
@@ -136,6 +172,14 @@ class RtspController(
             )
             return
 
-        TODO("Not Yet Implemented")
+        currentViewWidth = newWidth
+        currentViewHeight = newHeight
+        mRtspProcessor?.updateDecoderSurface(surface)
+    }
+
+    fun destroy() {
+        stop()
+        mRtspProcessor = null
+        surface.release()
     }
 }

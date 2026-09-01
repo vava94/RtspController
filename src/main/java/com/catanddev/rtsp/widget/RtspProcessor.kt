@@ -80,7 +80,7 @@ class RtspProcessor(
 
     private var audioDecodeThread: AudioDecodeThread? = null
     private val uiHandler = Handler(Looper.getMainLooper())
-    private var videoMimeType: String = "video/avc"
+    var videoMimeType: String = "video/avc"
     private var audioMimeType: String = ""
     private var audioSampleRate: Int = 0
     private var audioChannelCount: Int = 0
@@ -212,7 +212,7 @@ class RtspProcessor(
                         }
                         if (RtspController.DEBUG){
                             Log.d(TAG, "SPS frame: ${sps.toHexString(0, sps.size)}")
-                            Log.d(TAG, "\t${spsData.spsDataToString()}")
+                            //Log.d(TAG, "\t${spsData.spsDataToString()}")
                             Log.d(TAG, "PPS frame: ${pps.toHexString(0, pps.size)}")
                             if (vps.isNotEmpty())
                                 Log.d(TAG, "VPS frame: ${vps.toHexString(0, vps.size)}")
@@ -303,6 +303,10 @@ class RtspProcessor(
                         videoWidth = sps.width
                         videoHeight = sps.height
                         rtpStats.setResolution(sps.width, sps.height)
+                        // Уведомляем о новом размере видео
+                        uiHandler.post {
+                            statusListener?.onRtspVideoSizeChanged(sps.width, sps.height, videoRotation)
+                        }
                     }
                 } else {
                     framesPerGop++
