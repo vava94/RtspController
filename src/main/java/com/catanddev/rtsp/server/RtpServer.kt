@@ -40,7 +40,7 @@ class RtpServer {
 
     // Video stream parameters
     private val videoCodec: Int
-    private var videoPayloadType: Int = 97
+    private var videoPayloadType: Int = 96
 
     // Парсеры
     private lateinit var videoParser: RtpParser
@@ -63,7 +63,7 @@ class RtpServer {
         host: String = "0.0.0.0",
         port: Int = 50003,
         videoCodec: Int = RtspClient.VIDEO_CODEC_H264,
-        videoPayloadType: Int = 97,
+        videoPayloadType: Int = 96,
         exitFlag: AtomicBoolean = AtomicBoolean(false),
         listener: RtpServerListener,
         debug: Boolean = false,
@@ -243,6 +243,6 @@ class RtpServer {
     companion object {
         private val TAG: String = RtpServer::class.java.simpleName
         private val TAG_DEBUG: String = "$TAG DBG"
-        private const val DEBUG = false
+        private const val DEBUG = true
     }
 }

@@ -54,6 +54,7 @@ class RtspProcessor(
         var networkLatencyMsec = -1
     }
 
+    private var payloadType: Int = 96
     private lateinit var uri: Uri
     private var username: String? = null
     private var password: String? = null
@@ -74,7 +75,7 @@ class RtspProcessor(
     private var rtpServerVideoCodec: Int = RtspClient.VIDEO_CODEC_H264
 
     private var rtspThread: RtspThread? = null
-    private var videoFrameQueue = VideoFrameQueue(60)
+    var videoFrameQueue = VideoFrameQueue(60)
     private var audioFrameQueue = AudioFrameQueue(10)
     private var videoDecodeThread: VideoDecodeThread? = null
 
@@ -534,11 +535,12 @@ class RtspProcessor(
     /**
      * Инициализация для RTP потока
      */
-    fun initRtp(host: String = "0.0.0.0", port: Int = 8554, videoCodec: Int = RtspClient.VIDEO_CODEC_H264) {
+    fun initRtp(host: String = "0.0.0.0", port: Int = 8554, videoCodec: Int = RtspClient.VIDEO_CODEC_H264, payloadType: Int = 96) {
         if (RtspController.DEBUG)Log.v(TAG, "initRtp(host='$host', port=$port, codec=$videoCodec)")
         this.rtpServerHost = host
         this.rtpServerPort = port
         this.rtpServerVideoCodec = videoCodec
+        this.payloadType = payloadType
 
         // Устанавливаем MIME тип в зависимости от кодека
         this.videoMimeType = when (videoCodec) {
@@ -599,13 +601,6 @@ class RtspProcessor(
         videoDecodeThread = null
         audioDecodeThread?.stopAsync()
         audioDecodeThread = null
-    }
-
-    /**
-     * Получить очередь видео кадров (для использования из RtpStreamView)
-     */
-    fun getVideoFrameQueue(): VideoFrameQueue {
-        return videoFrameQueue
     }
 
     // Cached values
