@@ -166,8 +166,12 @@ object VideoCodecUtils {
     ): Boolean {
 
         if (source1.size - offsetSource1 < num || source2.size - offsetSource2 < num) return false
-        return source1.sliceArray(offsetSource1 until (offsetSource1 + num))
-            .contentEquals(source2.sliceArray(offsetSource2 until (offsetSource2 + num)))
+        // Прямое сравнение по индексам: без аллокаций (sliceArray создавал 2 массива на вызов,
+        // а memcmp вызывается на каждую позицию при поиске NAL-заголовка).
+        for (i in 0 until num) {
+            if (source1[offsetSource1 + i] != source2[offsetSource2 + i]) return false
+        }
+        return true
     }
 
     data class NalUnit (val type: Byte, val offset: Int, val length: Int)

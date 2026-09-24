@@ -150,12 +150,14 @@ interface RtspDataListener {                         // raw data for recorders
 | `stats/RtpStats` | Streaming metrics. |
 | `utils/NetUtils` | TLS socket helper (trust-all — fixture only). |
 
-**Decoding path (RTSP mode):**
+**Decoding path (RTSP and RTP modes share the same handler):**
 
-1. `RtspClient.execute()` connects and negotiates the session; `RtspProcessor` receives NAL units.
-2. On keyframes, SPS is parsed → resolution/rotation → `onRtspVideoSizeChanged` → `RtspController.onVideoSizeChanged`.
+1. `RtspClient.execute()` (RTSP) or `RtpServer` (plain UDP) produces NAL units.
+2. Both feed `RtspProcessor.handleVideoNalUnit()`: RTP statistics, keyframe detection, SPS parsing → resolution/rotation → `onRtspVideoSizeChanged` → `RtspController.onVideoSizeChanged`.
 3. Frames go into `VideoFrameQueue`; `VideoDecoderSurfaceThread` decodes them and renders into the app-provided `Surface`.
 4. The decoder's `INFO_OUTPUT_FORMAT_CHANGED` reports the true post-crop size via `onRtspFrameSizeChanged`.
+
+In RTP mode the decoder is started **before** the UDP socket, so early packets are not dropped by the `VideoDecodeThread.started` gate. `RtpServer` forwards the real RTP `sequenceNumber`/`marker`, so loss/jitter metrics are meaningful.
 
 ---
 
@@ -218,7 +220,6 @@ controller.start(true, false, false)
 - `FrameQueue` drops frames silently when full (capacity 60) — no drop counter exposed.
 - Audio: AAC (ADTS) only.
 - `NetUtils` uses a trust-all `X509TrustManager` — replace for production TLS.
-- RTP loss accounting requires real RTP sequence numbers from the server (all-zero `seq` yields meaningless loss metrics).
 - Software decode can be forced per-device via `MediaCodecHelper` workarounds.
 
 ---
@@ -228,3 +229,15 @@ controller.start(true, false, false)
 - Use a **debug** variant so `BuildConfig.DEBUG` logging is active: RTSP request/response dumps, per-frame NAL listings, decoder selection logs.
 - Watch Logcat for `MediaCodecHelper` device-specific workarounds and the chosen decoder (hardware vs. software).
 - Log `RtpStats.Stats` to diagnose packet loss, jitter and latency.
+
+---
+
+## 10. Performance notes
+
+Hot-path optimizations (all allocation-free per packet/frame):
+
+- **`memcmp` (both `RtspClient` and `VideoCodecUtils`)** compares by index instead of `sliceArray`. This was the dominant allocation source: it is called for every byte position while searching for a NAL start code (thousands of arrays per keyframe check).
+- **`RtspClient` input is wrapped in a `BufferedInputStream`** (16 KiB), so `readLine`/`readUntilBytesFound`/`readData` no longer issue a syscall per byte.
+- **`RtpServer`** parses the datagram and payload from reusable buffers (`packetBuffer`, `payloadBuffer`) instead of per-packet `copyOfRange`, and sets a 4 MiB socket `receiveBufferSize` to survive bitrate bursts.
+- **`RtpStats`** no longer keeps an unused per-packet `PacketInfo` history (which caused one allocation per packet plus an `O(n)` `removeAt(0)`).
+- Debug logging is fully compiled out when `BuildConfig.DEBUG == false`; no functional path depends on the flag.

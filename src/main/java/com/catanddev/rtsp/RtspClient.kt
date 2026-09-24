@@ -13,6 +13,7 @@ import com.catanddev.rtsp.parser.RtpParser
 import com.catanddev.rtsp.utils.NetUtils
 import com.catanddev.rtsp.utils.VideoCodecUtils
 import com.catanddev.rtsp.utils.VideoCodecUtils.getNalUnitType
+import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.IOException
 import java.io.InputStream
@@ -131,7 +132,9 @@ class RtspClient private constructor(builder: Builder) {
         if (DEBUG) Log.v(TAG, "execute()")
         listener.onRtspConnecting()
         try {
-            val inputStream = rtspSocket.getInputStream()
+            // Буферизуем чтение: readLine/readUntilBytesFound/readData читают мелкими порциями,
+            // без буфера это лишние системные вызовы на каждый байт/пакет.
+            val inputStream = BufferedInputStream(rtspSocket.getInputStream(), 16 * 1024)
             val outputStream: OutputStream =
                 if (debug) LoggerOutputStream(rtspSocket.getOutputStream()) else BufferedOutputStream(
                     rtspSocket.getOutputStream()
@@ -1689,8 +1692,11 @@ class RtspClient private constructor(builder: Builder) {
             num: Int
         ): Boolean {
             if (source1.size - offsetSource1 < num || source2.size - offsetSource2 < num) return false
-            return source1.sliceArray(offsetSource1 until (offsetSource1 + num))
-                .contentEquals(source2.sliceArray(offsetSource2 until (offsetSource2 + num)))
+            // Прямое сравнение по индексам: без аллокаций (sliceArray создавал 2 массива на вызов).
+            for (i in 0 until num) {
+                if (source1[offsetSource1 + i] != source2[offsetSource2 + i]) return false
+            }
+            return true
         }
 
         private fun shiftLeftArray(array: ByteArray, num: Int) {

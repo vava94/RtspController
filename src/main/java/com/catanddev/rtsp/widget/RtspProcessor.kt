@@ -117,6 +117,119 @@ class RtspProcessor(
         rtpStats.calculateStats()
     }
 
+    private var framesPerGop = 0
+
+    /**
+     * Единая точка входа для видеокадров в RTP-режиме (из [com.catanddev.rtsp.server.RtpServer]).
+     * Использует тот же обработчик, что и RTSP-путь: статистика, определение keyframe,
+     * парсинг SPS (размер/поворот) и постановка в очередь.
+     */
+    fun onRtpVideoNalUnitReceived(
+        data: ByteArray,
+        offset: Int,
+        length: Int,
+        timestamp: Long,
+        seq: Int,
+        marker: Boolean
+    ) {
+        handleVideoNalUnit(data, offset, length, timestamp, seq, marker)
+    }
+
+    @SuppressLint("UnsafeOptInUsageError")
+    private fun handleVideoNalUnit(
+        data: ByteArray,
+        offset: Int,
+        length: Int,
+        timestamp: Long,
+        seq: Int,
+        marker: Boolean
+    ) {
+        if (!VideoDecodeThread.started) return
+
+        // Notify RTP stats about packet
+        rtpStats.onPacket(length, timestamp, seq, marker)
+
+        val isH265 = videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC
+        // Search for NAL_IDR_SLICE within first 1KB maximum
+        val isKeyframe = VideoCodecUtils.isAnyKeyFrame(data, offset, min(length, 1000), isH265)
+
+        var videoFrame = FrameQueue.VideoFrame(
+            if (isH265) VideoCodecType.H265 else VideoCodecType.H264,
+            isKeyframe,
+            data,
+            offset,
+            length,
+            timestamp,
+            capturedTimestampMs = System.currentTimeMillis()
+        )
+        if (isKeyframe && experimentalUpdateSpsFrameWithLowLatencyParams) {
+            videoFrame = getNewLowLatencyFrameFromKeyFrame(videoFrame)
+        }
+
+        // Парсинг SPS и уведомление о разрешении — функциональный код.
+        // Не должен зависеть от отладочного флага, иначе размер/поворот не дойдут до view
+        // в release-сборках (и при выключенном DEBUG).
+        if (isKeyframe) {
+            framesPerGop = 0
+            val sps = try {
+                VideoCodecUtils.getSpsNalUnitFromArray(
+                    videoFrame.data,
+                    videoFrame.offset,
+                    // Check only first 100 bytes maximum. That's enough for finding SPS NAL unit.
+                    Integer.min(videoFrame.length, VideoCodecUtils.MAX_NAL_SPS_SIZE),
+                    isH265
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to parse SPS from keyframe", e)
+                null
+            }
+            if (sps != null) {
+                videoWidth = sps.width
+                videoHeight = sps.height
+                rtpStats.setResolution(sps.width, sps.height)
+                // Уведомляем о новом размере видео
+                val w = sps.width
+                val h = sps.height
+                val rotation = videoRotation
+                uiHandler.post {
+                    statusListener?.onRtspVideoSizeChanged(w, h, rotation)
+                }
+            }
+        } else {
+            framesPerGop++
+        }
+
+        if (RtspController.DEBUG){
+            nalUnitsFound.clear()
+            VideoCodecUtils.getNalUnits(videoFrame.data, videoFrame.offset, videoFrame.length, nalUnitsFound, isH265)
+            var b = StringBuilder()
+            for (nal in nalUnitsFound) {
+                b
+                    .append(if (isH265)
+                        VideoCodecUtils.getH265NalUnitTypeString(nal.type)
+                    else
+                        VideoCodecUtils.getH264NalUnitTypeString(nal.type))
+                    .append(" (${nal.length}), ")
+            }
+            if (b.length > 2)
+                b = b.removeRange(b.length - 2, b.length) as StringBuilder
+            Log.d(TAG, "NALs: $b")
+            if (isKeyframe) {
+                Log.d(TAG,
+                    "\tKey frame received (${videoFrame.length} bytes, ts=$timestamp," +
+                            " ${videoWidth}x${videoHeight}," +
+                            " GoP=$framesPerGop)")
+            }
+        }
+
+        videoFrameQueue.push(videoFrame)
+        dataListener?.onRtspDataVideoNalUnitReceived(
+            videoFrame.data,
+            videoFrame.offset,
+            videoFrame.length,
+            timestamp)
+    }
+
     /**
      * Show more debug info on console on runtime.
      */
@@ -241,96 +354,10 @@ class RtspProcessor(
             }
         }
 
-        private var framesPerGop = 0
-
         @SuppressLint("UnsafeOptInUsageError")
         override fun onRtspVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long, seq: Int, marker: Boolean) {
             if (RtspController.DEBUG)Log.v(TAG, "onRtspVideoNalUnitReceived(data.size=${data.size}, length=$length, timestamp=$timestamp)")
-            if (!VideoDecodeThread.started) return
-
-            // Notify RTP stats about packet
-            rtpStats.onPacket(length, timestamp, seq, marker)
-
-            val isH265 = videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC
-            // Search for NAL_IDR_SLICE within first 1KB maximum
-            val isKeyframe = VideoCodecUtils.isAnyKeyFrame(data, offset, min(length, 1000), isH265)
-
-            var videoFrame = FrameQueue.VideoFrame(
-                VideoCodecType.H264,
-                isKeyframe,
-                data,
-                offset,
-                length,
-                timestamp,
-                capturedTimestampMs = System.currentTimeMillis()
-            )
-            if (isKeyframe && experimentalUpdateSpsFrameWithLowLatencyParams) {
-                videoFrame = getNewLowLatencyFrameFromKeyFrame(videoFrame)
-            }
-
-            // Парсинг SPS и уведомление о разрешении — функциональный код.
-            // Не должен зависеть от отладочного флага, иначе размер/поворот не дойдут до view
-            // в release-сборках (и при выключенном DEBUG).
-            if (isKeyframe) {
-                framesPerGop = 0
-                val sps = try {
-                    VideoCodecUtils.getSpsNalUnitFromArray(
-                        videoFrame.data,
-                        videoFrame.offset,
-                        // Check only first 100 bytes maximum. That's enough for finding SPS NAL unit.
-                        Integer.min(videoFrame.length, VideoCodecUtils.MAX_NAL_SPS_SIZE),
-                        isH265
-                    )
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to parse SPS from keyframe", e)
-                    null
-                }
-                if (sps != null) {
-                    videoWidth = sps.width
-                    videoHeight = sps.height
-                    rtpStats.setResolution(sps.width, sps.height)
-                    // Уведомляем о новом размере видео
-                    val w = sps.width
-                    val h = sps.height
-                    val rotation = videoRotation
-                    uiHandler.post {
-                        statusListener?.onRtspVideoSizeChanged(w, h, rotation)
-                    }
-                }
-            } else {
-                framesPerGop++
-            }
-
-            if (RtspController.DEBUG){
-                nalUnitsFound.clear()
-                VideoCodecUtils.getNalUnits(videoFrame.data, videoFrame.offset, videoFrame.length, nalUnitsFound, isH265)
-                var b = StringBuilder()
-                for (nal in nalUnitsFound) {
-                    b
-                        .append(if (isH265)
-                            VideoCodecUtils.getH265NalUnitTypeString(nal.type)
-                        else
-                            VideoCodecUtils.getH264NalUnitTypeString(nal.type))
-                        .append(" (${nal.length}), ")
-                }
-                if (b.length > 2)
-                    b = b.removeRange(b.length - 2, b.length) as StringBuilder
-                Log.d(TAG, "NALs: $b")
-                if (isKeyframe) {
-                    Log.d(TAG,
-                        "\tKey frame received (${videoFrame.length} bytes, ts=$timestamp," +
-                                " ${videoWidth}x${videoHeight}," +
-                                " GoP=$framesPerGop)")
-                }
-            }
-
-
-            videoFrameQueue.push(videoFrame)
-            dataListener?.onRtspDataVideoNalUnitReceived(
-                videoFrame.data,
-                videoFrame.offset,
-                videoFrame.length,
-                timestamp)
+            handleVideoNalUnit(data, offset, length, timestamp, seq, marker)
         }
 
         override fun onRtspAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long) {

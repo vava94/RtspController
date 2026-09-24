@@ -42,21 +42,11 @@ class RtpStats {
 
     // Параметры
     companion object {
-        private const val MAX_PACKET_HISTORY = 500
         private const val MAX_FRAME_INTERVALS = 30
         private const val DEFAULT_CLOCK_RATE = 90000L
         private const val JITTER_DECAY = 0.0625
     }
 
-    private data class PacketInfo(
-        val arrival: Long,
-        val rtpTimestamp: Int,
-        val seq: Int,
-        val marker: Boolean,
-        val size: Int
-    )
-
-    private val packets = mutableListOf<PacketInfo>()
     private val queueMutex = Any()
 
     // Для джиттера (RFC 3550)
@@ -168,13 +158,6 @@ class RtpStats {
                 gapMinMs = min(gapMinMs, gapMs)
             }
             lastPacketTime = arrivalTime
-
-            // Сохраняем информацию о пакете
-            val packetInfo = PacketInfo(arrivalTime, timestamp.toInt(), seq, marker, size)
-            packets.add(packetInfo)
-            if (packets.size > MAX_PACKET_HISTORY) {
-                packets.removeAt(0)
-            }
 
             // Если это маркерный пакет (начало кадра)
             if (marker) {
@@ -324,7 +307,6 @@ class RtpStats {
      */
     fun reset() {
         synchronized(queueMutex) {
-            packets.clear()
             frameIntervals.clear()
             syncPoints.clear()
             

@@ -25,6 +25,23 @@ class RtpServer {
         fun onRtpServerStarting()
         fun onRtpServerStarted()
         fun onRtpVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long)
+
+        /**
+         * Расширенная версия с RTP sequence number и marker.
+         * Нужна для достоверной статистики (потери/джиттер) и определения конца кадра.
+         * По умолчанию делегирует в базовый метод — существующие реализации не ломаются.
+         */
+        fun onRtpVideoNalUnitReceived(
+            data: ByteArray,
+            offset: Int,
+            length: Int,
+            timestamp: Long,
+            seq: Int,
+            marker: Boolean
+        ) {
+            onRtpVideoNalUnitReceived(data, offset, length, timestamp)
+        }
+
         fun onRtpAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long)
         fun onRtpServerStopping()
         fun onRtpServerStopped()
@@ -45,6 +62,11 @@ class RtpServer {
 
     // Парсеры
     private lateinit var videoParser: RtpParser
+
+    // Переиспользуемые буферы (обработка однопоточная — можно не аллоцировать на каждый пакет).
+    // Растут лениво до нужного размера.
+    private var packetBuffer = ByteArray(0)
+    private var payloadBuffer = ByteArray(0)
 
     // Статистика
     private var packetsReceived = 0L
@@ -112,6 +134,12 @@ class RtpServer {
             val address = InetAddress.getByName(host)
             socket = DatagramSocket(port, address)
             socket.soTimeout = 1000 // 1 second timeout для graceful exit
+            // Увеличиваем буфер приёма ядра, иначе при пиках битрейта пакеты дропаются молча
+            try {
+                socket.receiveBufferSize = 4 * 1024 * 1024
+            } catch (e: Exception) {
+                Log.w(TAG, "Cannot set receive buffer size: ${e.message}")
+            }
 
             if (debug) {
                 Log.i(TAG_DEBUG, "RTP Server created socket successfully")
@@ -128,10 +156,14 @@ class RtpServer {
                     socket.receive(packet)
                     packetsReceived++
 
-                    val data = packet.data.copyOfRange(packet.offset, packet.offset + packet.length)
+                    // Копируем в переиспользуемый буфер (учитывает packet.offset) вместо copyOfRange,
+                    // чтобы не создавать новый массив на каждый пакет.
+                    val dataLength = packet.length
+                    if (packetBuffer.size < dataLength) packetBuffer = ByteArray(dataLength)
+                    System.arraycopy(packet.data, packet.offset, packetBuffer, 0, dataLength)
 
                     // Парсим RTP заголовок
-                    val header = RtpHeaderParser.RtpHeader.parseData(data, packet.length)
+                    val header = RtpHeaderParser.RtpHeader.parseData(packetBuffer, dataLength)
                     if (header == null) {
                         if (debug) Log.w(TAG_DEBUG, "Invalid RTP packet received")
                         continue
@@ -143,7 +175,7 @@ class RtpServer {
 
                     // Проверяем payload type для видео
                     if (header.payloadType == videoPayloadType) {
-                        processVideoPacket(data, header, videoParser)
+                        processVideoPacket(packetBuffer, dataLength, header, videoParser)
                     }
 
                 } catch (e: java.net.SocketTimeoutException) {
@@ -177,6 +209,7 @@ class RtpServer {
 
     private fun processVideoPacket(
         data: ByteArray,
+        dataLength: Int,
         header: RtpHeaderParser.RtpHeader,
         parser: RtpParser
     ) {
@@ -198,38 +231,44 @@ class RtpServer {
         }
 
         // Размер payload - это общий размер пакета минус смещение до payload
-        val payloadSize = data.size - payloadStart
+        val payloadSize = dataLength - payloadStart
 
         if (payloadSize <= 0) {
             Log.w(TAG_DEBUG, "Empty payload in RTP packet")
             return
         }
 
-        val payloadData = data.copyOfRange(payloadStart, data.size)
+        // Переиспользуемый буфер payload вместо copyOfRange (0 аллокаций на пакет)
+        if (payloadBuffer.size < payloadSize) payloadBuffer = ByteArray(payloadSize)
+        System.arraycopy(data, payloadStart, payloadBuffer, 0, payloadSize)
 
         if (debug) {
             Log.d(TAG_DEBUG, "RTP Packet: headerSize=$payloadStart, payloadSize=$payloadSize, " +
                     "marker=${header.marker}, seq=${header.sequenceNumber}")
 
-            if (payloadData.size > 0) {
-                val firstByte = payloadData[0]
+            if (payloadSize > 0) {
+                val firstByte = payloadBuffer[0]
                 val nalType: Int = (firstByte.toInt() shr 1) and 0x3F
-                Log.d(TAG_DEBUG, "NAL type: $nalType, first bytes: ${
-                    payloadData.take(4).joinToString(" ") { "%02x".format(it) }
-                }")
+                val preview = (0 until minOf(4, payloadSize)).joinToString(" ") {
+                    "%02x".format(payloadBuffer[it])
+                }
+                Log.d(TAG_DEBUG, "NAL type: $nalType, first bytes: $preview")
             }
         }
 
         // Используем RtpParser для обработки всех кодеков (H.264 и H.265)
         val nalUnit = parser.processRtpPacketAndGetNalUnit(
-            payloadData,
+            payloadBuffer,
             payloadSize,
             header.marker == 1
         )
 
         if (nalUnit != null) {
             nalUnitsReceived++
-            sendToListener(nalUnit, 0, nalUnit.size, header.timestampMs)
+            sendToListener(
+                nalUnit, 0, nalUnit.size,
+                header.timestampMs, header.sequenceNumber, header.marker == 1
+            )
         }
     }
 
@@ -237,8 +276,15 @@ class RtpServer {
     // Вся обработка H.265 FU-A пакетов делегирована RtpH265Parser, который правильно сохраняет temporal_id (tid)
     // и корректно собирает фрагментированные NAL-юниты
 
-    private fun sendToListener(data: ByteArray, offset: Int, length: Int, timestamp: Long) {
-        listener.onRtpVideoNalUnitReceived(data, offset, length, timestamp)
+    private fun sendToListener(
+        data: ByteArray,
+        offset: Int,
+        length: Int,
+        timestamp: Long,
+        seq: Int,
+        marker: Boolean
+    ) {
+        listener.onRtpVideoNalUnitReceived(data, offset, length, timestamp, seq, marker)
     }
 
     companion object {

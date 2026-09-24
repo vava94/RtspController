@@ -169,13 +169,16 @@ class RtspController(
     }
 
     fun start(requestVideo: Boolean = true, requestAudio: Boolean = false, requestApplication: Boolean = false) {
+        // Сначала запускаем декодеры (processor), затем RtpServer: к моменту прихода первых
+        // пакетов декодер уже запущен, иначе кадры отбрасываются проверкой VideoDecodeThread.started.
+        mRtspProcessor?.start(requestVideo, requestAudio, requestApplication)
+
         // Запускаем RtpServer для RTP режима
         if (mode == OPERATION_MODE.RTP) {
             mRtpServer?.start()
             Log.i(TAG, "RTP server started")
         }
 
-        mRtspProcessor?.start(requestVideo, requestAudio, requestApplication)
         isActive = true
     }
 
@@ -229,26 +232,20 @@ class RtspController(
         }
 
         override fun onRtpVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long) {
-            mRtspProcessor?.let { processor ->
-                // Передаем NAL юнит в процессор для декодирования
-                val isH265 = processor.videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC
-                processor.onRtpPacketReceived(data, length, timestamp, 0, length > 0)
+            onRtpVideoNalUnitReceived(data, offset, length, timestamp, 0, length > 0)
+        }
 
-                // Push NAL unit to video frame queue for decoding
-                val isKeyframe = com.catanddev.rtsp.utils.VideoCodecUtils.isAnyKeyFrame(data, offset, length, isH265)
-                processor.videoFrameQueue.push(
-                    com.catanddev.rtsp.codec.FrameQueue.VideoFrame(
-                        if (isH265) com.catanddev.rtsp.codec.VideoCodecType.H265
-                        else com.catanddev.rtsp.codec.VideoCodecType.H264,
-                        isKeyframe,
-                        data,
-                        offset,
-                        length,
-                        timestamp,
-                        capturedTimestampMs = System.currentTimeMillis()
-                    )
-                )
-            }
+        override fun onRtpVideoNalUnitReceived(
+            data: ByteArray,
+            offset: Int,
+            length: Int,
+            timestamp: Long,
+            seq: Int,
+            marker: Boolean
+        ) {
+            // Единый путь обработки как в RTSP-режиме: статистика, парсинг SPS (размер/поворот),
+            // определение keyframe и постановка кадра в очередь декодера.
+            mRtspProcessor?.onRtpVideoNalUnitReceived(data, offset, length, timestamp, seq, marker)
         }
 
         override fun onRtpAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long) {
