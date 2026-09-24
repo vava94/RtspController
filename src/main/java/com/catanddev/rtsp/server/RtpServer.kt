@@ -1,6 +1,7 @@
 package com.catanddev.rtsp.server
 
 import android.util.Log
+import com.catanddev.rtsp.BuildConfig
 import com.catanddev.rtsp.parser.RtpHeaderParser
 import com.catanddev.rtsp.parser.RtpH264Parser
 import com.catanddev.rtsp.parser.RtpH265Parser
@@ -243,6 +244,6 @@ class RtpServer {
     companion object {
         private val TAG: String = RtpServer::class.java.simpleName
         private val TAG_DEBUG: String = "$TAG DBG"
-        private const val DEBUG = true
+        private val DEBUG = BuildConfig.DEBUG
     }
 }

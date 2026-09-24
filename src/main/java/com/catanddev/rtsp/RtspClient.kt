@@ -678,7 +678,7 @@ class RtspClient private constructor(builder: Builder) {
     companion object {
         private val TAG: String = RtspClient::class.java.simpleName
         val TAG_DEBUG: String = TAG + " DBG"
-        private const val DEBUG = true
+        private val DEBUG = BuildConfig.DEBUG
         private val EMPTY_ARRAY = ByteArray(0)
 
         const val RTSP_CAPABILITY_NONE: Int = 0

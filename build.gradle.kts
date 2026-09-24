@@ -12,7 +12,8 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        minSdk = 30
+        // Android 9 (API 28) — минимальная поддерживаемая версия
+        minSdk = 28
     }
 
     compileOptions {
@@ -21,6 +22,11 @@ android {
     }
     lint {
         targetSdk = 36
+    }
+
+    buildFeatures {
+        // Нужен BuildConfig.DEBUG для отключения debug-логов в release-сборках
+        buildConfig = true
     }
 }
 

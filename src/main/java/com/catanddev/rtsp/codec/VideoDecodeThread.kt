@@ -171,6 +171,7 @@ abstract class VideoDecodeThread (
     /** Decoder stopped and released */
     abstract fun decoderDestroyed(mediaCodec: MediaCodec)
 
+    @SuppressLint("InlinedApi") // FEATURE_LowLatency — инлайновая строковая константа, безопасна на API 28
     private fun createVideoDecoderAndStart(decoderType: DecoderType): MediaCodec {
         if (debug) Log.v(TAG, "createVideoDecoderAndStart(decoderType=$decoderType)")
 
@@ -222,12 +223,27 @@ abstract class VideoDecodeThread (
 
         val lowLatencySupport =
             capabilities.isFeatureSupported(android.media.MediaCodecInfo.CodecCapabilities.FEATURE_LowLatency)
+        val isHardwareAccelerated = isHardwareAcceleratedDecoder(decoder)
         Log.i(TAG, "[$name] Video decoder '${decoder.name}' started " +
-                "(${ if (decoder.codecInfo.isHardwareAccelerated) "hardware" else "software" }, " +
+                "(${if (isHardwareAccelerated) "hardware" else "software"}, " +
                 "${capabilities.capabilitiesToString()}, " +
                 "${if (lowLatencySupport) "w/" else "w/o"} low-latency support)")
 
         return decoder
+    }
+
+    /**
+     * На Android 9 (API 28) метода MediaCodecInfo.isHardwareAccelerated() ещё нет
+     * (добавлен в API 29), поэтому определяем тип декодера по имени.
+     */
+    private fun isHardwareAcceleratedDecoder(decoder: MediaCodec): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return decoder.codecInfo.isHardwareAccelerated
+        }
+        val name = decoder.name
+        return !name.startsWith("omx.google", ignoreCase = true) &&
+                !name.startsWith("c2.android", ignoreCase = true) &&
+                !name.startsWith("AVCDecoder", ignoreCase = true)
     }
 
     private fun stopAndReleaseVideoDecoder(decoder: MediaCodec) {

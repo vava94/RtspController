@@ -23,7 +23,7 @@ class RtspController(
 
     companion object {
         val TAG = RtspController::class.java.simpleName
-        val DEBUG = true
+        val DEBUG = BuildConfig.DEBUG
     }
 
     interface RtspControllerCallbacks{
@@ -53,7 +53,6 @@ class RtspController(
         private set
 
     var videoCodec = VideoCodec.H264
-        private set
 
     private var mRtspProcessor: RtspProcessor? = null
     private var mRtpServer: RtpServer? = null
@@ -88,6 +87,12 @@ class RtspController(
             override fun onRtspVideoSizeChanged(width: Int, height: Int, rotation: Int) {
                 onVideoSizeChanged?.invoke(width, height, rotation)
             }
+
+            override fun onRtspFrameSizeChanged(width: Int, height: Int) {
+                // Разрез из INFO_OUTPUT_FORMAT_CHANGED декодера — уже с учётом поворота (90/270).
+                // Поворот декодер применяет сам при рендере в Surface, view ничего вращать не нужно.
+                onVideoSizeChanged?.invoke(width, height, 0)
+            }
         }
     }
 
@@ -106,25 +111,23 @@ class RtspController(
         mInitProcessor()
 
         mRtspProcessor!!.init(address, username, password)
+        isInitialized = true
         return isInitialized
     }
 
-    fun initRtp(bindAddress: String, port: UShort, payloadType: Int): Boolean {
+    fun initRtp(
+        bindAddress: String,
+        port: UShort,
+        payloadType: Int,
+        videoCodec: VideoCodec = this.videoCodec
+    ): Boolean {
         if (mode != OPERATION_MODE.RTP) {
             Log.e(TAG, "Cannot initialize RTP in RTSP mode")
             return false
         }
 
-        videoCodec = when (videoCodec) {
-            VideoCodec.H265 -> {
-                Log.i(TAG, "Initializing RTP with H.265 codec")
-                VideoCodec.H265
-            }
-            else -> {
-                Log.i(TAG, "Initializing RTP with H.264 codec")
-                VideoCodec.H264
-            }
-        }
+        this.videoCodec = videoCodec
+        Log.i(TAG, "Initializing RTP with ${if (videoCodec == VideoCodec.H265) "H.265" else "H.264"} codec")
 
         if (mRtspProcessor != null) {
             mRtspProcessor?.stop()
@@ -161,6 +164,7 @@ class RtspController(
         )
 
         Log.i(TAG, "RTP server initialized on $bindAddress:$port")
+        isInitialized = true
         return true
     }
 
@@ -207,7 +211,9 @@ class RtspController(
         stop()
         mRtpServer = null
         mRtspProcessor = null
-        surface.release()
+        isInitialized = false
+        // Surface'ом владеет StreamView (TextureView) — освобождать его здесь нельзя,
+        // иначе убьём Surface, который переживает контроллер.
     }
 
     /**

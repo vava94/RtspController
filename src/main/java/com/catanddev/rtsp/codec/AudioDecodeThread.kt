@@ -101,7 +101,7 @@ class AudioDecodeThread (
         val outChannel = if (channelCount > 1) AudioFormat.CHANNEL_OUT_STEREO else AudioFormat.CHANNEL_OUT_MONO
         val outAudio = AudioFormat.ENCODING_PCM_16BIT
         val bufferSize = AudioTrack.getMinBufferSize(sampleRate, outChannel, outAudio)
-            if (DEBUG) Log.i(TAG, "sampleRate: $sampleRate, bufferSize: $bufferSize")
+        if (DEBUG) Log.i(TAG, "sampleRate: $sampleRate, bufferSize: $bufferSize")
         val audioTrack = AudioTrack(
             AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_MEDIA)

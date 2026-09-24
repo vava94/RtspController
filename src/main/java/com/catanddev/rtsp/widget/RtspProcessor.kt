@@ -243,6 +243,7 @@ class RtspProcessor(
 
         private var framesPerGop = 0
 
+        @SuppressLint("UnsafeOptInUsageError")
         override fun onRtspVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long, seq: Int, marker: Boolean) {
             if (RtspController.DEBUG)Log.v(TAG, "onRtspVideoNalUnitReceived(data.size=${data.size}, length=$length, timestamp=$timestamp)")
             if (!VideoDecodeThread.started) return
@@ -253,8 +254,6 @@ class RtspProcessor(
             val isH265 = videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC
             // Search for NAL_IDR_SLICE within first 1KB maximum
             val isKeyframe = VideoCodecUtils.isAnyKeyFrame(data, offset, min(length, 1000), isH265)
-
-
 
             var videoFrame = FrameQueue.VideoFrame(
                 VideoCodecType.H264,
@@ -267,6 +266,39 @@ class RtspProcessor(
             )
             if (isKeyframe && experimentalUpdateSpsFrameWithLowLatencyParams) {
                 videoFrame = getNewLowLatencyFrameFromKeyFrame(videoFrame)
+            }
+
+            // Парсинг SPS и уведомление о разрешении — функциональный код.
+            // Не должен зависеть от отладочного флага, иначе размер/поворот не дойдут до view
+            // в release-сборках (и при выключенном DEBUG).
+            if (isKeyframe) {
+                framesPerGop = 0
+                val sps = try {
+                    VideoCodecUtils.getSpsNalUnitFromArray(
+                        videoFrame.data,
+                        videoFrame.offset,
+                        // Check only first 100 bytes maximum. That's enough for finding SPS NAL unit.
+                        Integer.min(videoFrame.length, VideoCodecUtils.MAX_NAL_SPS_SIZE),
+                        isH265
+                    )
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse SPS from keyframe", e)
+                    null
+                }
+                if (sps != null) {
+                    videoWidth = sps.width
+                    videoHeight = sps.height
+                    rtpStats.setResolution(sps.width, sps.height)
+                    // Уведомляем о новом размере видео
+                    val w = sps.width
+                    val h = sps.height
+                    val rotation = videoRotation
+                    uiHandler.post {
+                        statusListener?.onRtspVideoSizeChanged(w, h, rotation)
+                    }
+                }
+            } else {
+                framesPerGop++
             }
 
             if (RtspController.DEBUG){
@@ -284,33 +316,11 @@ class RtspProcessor(
                 if (b.length > 2)
                     b = b.removeRange(b.length - 2, b.length) as StringBuilder
                 Log.d(TAG, "NALs: $b")
-                @SuppressLint("UnsafeOptInUsageError")
                 if (isKeyframe) {
-                    val sps = VideoCodecUtils.getSpsNalUnitFromArray(
-                        videoFrame.data,
-                        videoFrame.offset,
-                        // Check only first 100 bytes maximum. That's enough for finding SPS NAL unit.
-                        Integer.min(videoFrame.length, VideoCodecUtils.MAX_NAL_SPS_SIZE),
-                        isH265
-                    )
                     Log.d(TAG,
                         "\tKey frame received (${videoFrame.length} bytes, ts=$timestamp," +
-                                " ${sps?.width}x${sps?.height}," +
-                                " GoP=$framesPerGop," +
-                                " profile=${sps?.profileIdc}, level=${sps?.levelIdc})")
-
-                    framesPerGop = 0
-                    if (sps != null) {
-                        videoWidth = sps.width
-                        videoHeight = sps.height
-                        rtpStats.setResolution(sps.width, sps.height)
-                        // Уведомляем о новом размере видео
-                        uiHandler.post {
-                            statusListener?.onRtspVideoSizeChanged(sps.width, sps.height, videoRotation)
-                        }
-                    }
-                } else {
-                    framesPerGop++
+                                " ${videoWidth}x${videoHeight}," +
+                                " GoP=$framesPerGop)")
                 }
             }
 
