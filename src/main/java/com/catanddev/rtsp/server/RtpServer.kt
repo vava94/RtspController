@@ -42,6 +42,12 @@ class RtpServer {
             onRtpVideoNalUnitReceived(data, offset, length, timestamp)
         }
 
+        /**
+         * Учёт каждого видеопакета RTP (до сборки NAL-юнитов). Нужен для корректной
+         * сетевой статистики (потери/джиттер/входной битрейт). По умолчанию ничего не делает.
+         */
+        fun onRtpPacketReceived(seq: Int, timestampMs: Long, payloadSize: Int, marker: Boolean) {}
+
         fun onRtpAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long)
         fun onRtpServerStopping()
         fun onRtpServerStopped()
@@ -236,6 +242,14 @@ class RtpServer {
             Log.w(TAG_DEBUG, "Empty payload in RTP packet")
             return
         }
+
+        // Сетевые метрики — на каждый RTP-пакет (до сборки NAL).
+        listener.onRtpPacketReceived(
+            header.sequenceNumber,
+            header.timestampMs,
+            payloadSize,
+            header.marker == 1
+        )
 
         if (debug) {
             Log.d(TAG_DEBUG, "RTP Packet: headerSize=$payloadStart, payloadSize=$payloadSize, " +

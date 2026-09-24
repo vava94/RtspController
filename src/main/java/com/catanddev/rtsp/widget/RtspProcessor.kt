@@ -109,8 +109,18 @@ class RtspProcessor(
         return rtpStats.stats
     }
 
+    /**
+     * Учёт одного RTP-пакета. Вызывается из сетевого слоя ([com.catanddev.rtsp.server.RtpServer]
+     * или [com.catanddev.rtsp.RtspClient]) до сборки NAL-юнитов — так потери и джиттер
+     * считаются корректно даже при фрагментации.
+     */
+    fun onRtpPacketReceived(size: Int, timestamp: Long, seq: Int, marker: Boolean) {
+        rtpStats.onRtpPacket(size, timestamp, seq, marker)
+    }
+
+    @Deprecated("Use onRtpPacketReceived(size, timestamp, seq, marker)")
     fun onRtpPacketReceived(data: ByteArray, size: Int, timestamp: Long, seq: Int, marker: Boolean) {
-        rtpStats.onPacket(size, timestamp, seq, marker)
+        onRtpPacketReceived(size, timestamp, seq, marker)
     }
 
     fun calculateRtpStats() {
@@ -146,8 +156,9 @@ class RtspProcessor(
     ) {
         if (!VideoDecodeThread.started) return
 
-        // Notify RTP stats about packet
-        rtpStats.onPacket(length, timestamp, seq, marker)
+        // Учитываем размер собранного NAL-юнита для метрики видеобитрейта.
+        // Сетевые метрики (потери/джиттер) считаются на уровне RTP-пакетов.
+        rtpStats.onVideoNalUnit(length)
 
         val isH265 = videoMimeType == MediaFormat.MIMETYPE_VIDEO_HEVC
         // Search for NAL_IDR_SLICE within first 1KB maximum
@@ -358,6 +369,11 @@ class RtspProcessor(
         override fun onRtspVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long, seq: Int, marker: Boolean) {
             if (RtspController.DEBUG)Log.v(TAG, "onRtspVideoNalUnitReceived(data.size=${data.size}, length=$length, timestamp=$timestamp)")
             handleVideoNalUnit(data, offset, length, timestamp, seq, marker)
+        }
+
+        override fun onRtspRtpPacketReceived(size: Int, timestampMs: Long, seq: Int, marker: Boolean) {
+            // Сетевые метрики считаем на каждый RTP-пакет, а не на собранный NAL.
+            rtpStats.onRtpPacket(size, timestampMs, seq, marker)
         }
 
         override fun onRtspAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long) {

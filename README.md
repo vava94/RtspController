@@ -66,7 +66,7 @@ enum class VideoCodec { H264, H265 }
 | `var videoCodec: VideoCodec` | Codec for the current session (default `H264`). Public setter. |
 | `var onVideoSizeChanged: ((width, height, rotation) -> Unit)?` | Fired on the main thread when the real resolution/rotation becomes known (SPS parsing or decoder output format). |
 | `fun initRTSP(address: Uri, username: String, password: String): Boolean` | Prepare an RTSP session. Returns `false` if the controller is in RTP mode. |
-| `fun initRtp(bindAddress, port: UShort, payloadType: Int, videoCodec = this.videoCodec): Boolean` | Prepare a UDP RTP listener. |
+| `fun initRtp(bindAddress, port: UShort, payloadType: Int = DEFAULT_RTP_PAYLOAD_TYPE, videoCodec = this.videoCodec): Boolean` | Prepare a UDP RTP listener. `payloadType` is the RTP payload type to accept (dynamic range 96–127); defaults to `RtspController.DEFAULT_RTP_PAYLOAD_TYPE` = **96**. Packets with another payload type are ignored. |
 | `fun start(requestVideo = true, requestAudio = false, requestApplication = false)` | Start the pipeline, set `isActive = true`. |
 | `fun stop()` | Stop server, session and decoders; set `isActive = false`. |
 | `fun getStats(): RtpStats?` | Recalculate and return streaming metrics. |
@@ -163,14 +163,19 @@ In RTP mode the decoder is started **before** the UDP socket, so early packets a
 
 ## 5. Statistics (`RtpStats`)
 
-`RtspController.getStats()` recalculates and returns `RtpStats.Stats`:
+`RtspController.getStats()` recalculates and returns `RtpStats.Stats`.
 
-- **Stream:** `width`, `height`, `fps`, `bitrateMbps`, `inputBitrateMbps`.
-- **Network:** `packetsLost`, `packetLossPercent`, `outOfOrderPackets`, `maxBurstLoss`, `totalPacketsReceived`, `bytesReceived`.
-- **Timing:** `jitterMs` (RFC 3550), `clockRate` (auto-detected, default 90 kHz), packet gap min/avg/max.
-- **Latency:** `networkLatencyMs`, `decodeLatencyMs`, `totalLatencyMs`.
+**Collection model.** Network metrics are collected **per RTP packet**, not per NAL unit. One NAL may be split into many RTP packets (FU-A), so counting losses on assembled NALs would report the number of fragments as "loss". Both the RTSP client and the UDP server notify stats for every received video packet before depacketization.
 
-Call `calculateStats()` (or `getStats()`) before reading values.
+- **Stream:** `width`, `height` (from SPS), `fps` (counted on RTP marker bits = frame ends), `bitrateMbps` (video: sum of assembled NAL sizes), `inputBitrateMbps` (network: sum of RTP payload sizes).
+- **Network (cumulative):** `packetsLost` (forward sequence-number gaps, RFC 3550), `packetLossPercent` = `lost / (lost + received) × 100`, `outOfOrderPackets` (late/duplicate packets — **not** counted as loss), `maxBurstLoss` (longest consecutive loss run), `totalPacketsReceived`, `bytesReceived`.
+- **Timing:** `jitterMs` (RFC 3550, computed from RTP timestamps already converted to ms), packet gap min/avg/max over the last calculation interval.
+- **Latency:** `decodeLatencyMs` = time from queuing a frame into the decoder to its output; `totalLatencyMs` = the same value. `networkLatencyMs` stays `0` because one-way network latency cannot be measured without clock synchronisation with the sender (RTCP SR / NTP).
+
+**Interpretation notes.**
+- Loss / out-of-order / `maxBurstLoss` / `totalPacketsReceived` are **cumulative** since `reset()`. `fps`, bitrates and packet gaps are **per interval** (between two `calculateStats()` calls). Call `calculateStats()` regularly (e.g. once per second) for stable values.
+- `clockRate` is informational and fixed at 90 kHz (timestamps are converted with `ms = rtpTs / 90`).
+- `reset()` clears all counters and starts a new measurement window.
 
 ---
 

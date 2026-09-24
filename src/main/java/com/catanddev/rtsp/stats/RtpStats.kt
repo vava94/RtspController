@@ -1,6 +1,6 @@
 package com.catanddev.rtsp.stats
 
-import android.util.Log
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -16,7 +16,7 @@ class RtpStats {
         var currentRtpTimestamp: Int = 0,
         var clockRate: Long = 90000,
 
-        // --- Новые сетевые метрики ---
+        // --- Сетевые метрики (накопительные) ---
         var packetsLost: Int = 0,
         var packetLossPercent: Double = 0.0,
         var outOfOrderPackets: Int = 0,
@@ -42,89 +42,80 @@ class RtpStats {
 
     // Параметры
     companion object {
-        private const val MAX_FRAME_INTERVALS = 30
-        private const val DEFAULT_CLOCK_RATE = 90000L
         private const val JITTER_DECAY = 0.0625
+        private const val MAX_LATENCY_SAMPLES = 100
+        private const val SEQ_HALF_RANGE = 0x8000
     }
 
     private val queueMutex = Any()
 
-    // Для джиттера (RFC 3550)
-    private var lastRtpTimestamp = 0
+    // Джиттер (RFC 3550). Время в миллисекундах (timestamp уже переведён из RTP-единиц).
     private var transit: Double = 0.0
+    private var transitInitialized = false
     private var jitter = 0.0
+    private var lastRtpTimestamp = 0
 
-    // Для автоопределения clock rate
-    private val frameIntervals = mutableListOf<Double>()
-    private var lastFrameTime: Long = 0
-    private var lastFrameTimestamp = 0
-    private var clockRateLocked = false
-
-    // Для FPS и битрейта
+    // FPS и битрейт
     private var frameCount = 0L
-    private var byteCount = 0L
+    private var byteCount = 0L          // Видео (сумма собранных NAL-юнитов)
     private var lastFrameCount = 0L
 
-    // Для задержки
+    // Интервалы между RTP-пакетами (за интервал расчёта)
     private var lastPacketTime: Long = 0
-    private var lastFrameArrival: Long = 0
-    private var framePushedTime: Long = 0
-
-    // Для packet gap
     private var gapCount = 0L
     private var gapSumMs = 0.0
     private var gapMaxMs = 0.0
     private var gapMinMs = Double.MAX_VALUE
 
-    // Для точек синхронизации задержки
-    private data class SyncPoint(
-        val networkTime: Long,
-        val decodeTime: Long,
-        val rtpTimestamp: Int
-    )
-    private val syncPoints = mutableListOf<SyncPoint>()
-    private val maxSyncPoints = 100
+    // Задержка декодирования: RTP-время кадра (мс) -> время постановки в декодер (wall clock)
+    private val framePushTimes = HashMap<Long, Long>()
 
-    // --- Новые поля для сетевых метрик ---
-    // Sequence number анализ
+    // Анализ sequence number
     private var lastSeq = 0
-    private var packetsLostTotal = 0
-    private var outOfOrderTotal = 0
+    private var firstPacket = true
+    private var packetsLostTotal = 0        // накопительно
+    private var outOfOrderTotal = 0         // накопительно
     private var currentBurst = 0
     private var maxBurst = 0
-    private var firstPacket = true
     private var totalPacketsReceived = 0L
 
     private var lastCalculationTime: Long = 0
-    fun onPacket(size: Int, timestamp: Long, seq: Int, marker: Boolean) {
+
+    /**
+     * Учёт каждого принятого RTP-пакета.
+     *
+     * Именно на уровне RTP-пакетов корректно считаются потери, джиттер, межинтервальные
+     * задержки и входной битрейт. Учёт на уровне NAL-юнитов (как было раньше) неверен:
+     * один NAL может собираться из десятков пакетов, поэтому разница sequence number
+     * между соседними NAL — это число фрагментов, а не потери.
+     *
+     * @param size размер RTP payload в байтах
+     * @param timestampMs RTP-время пакета, уже переведённое в миллисекунды
+     */
+    fun onRtpPacket(size: Int, timestampMs: Long, seq: Int, marker: Boolean) {
         val arrivalTime = System.currentTimeMillis()
 
         synchronized(queueMutex) {
-            // Обновляем статистику приёма
+            // Приём
             stats.bytesReceived += size
-            byteCount += size
             totalPacketsReceived++
             stats.totalPacketsReceived = totalPacketsReceived
 
-            // Анализ последовательности пакетов
+            // Потери / переупорядочивание по sequence number (RFC 3550 A.1)
             if (!firstPacket) {
                 val expectedSeq = (lastSeq + 1) and 0xFFFF
                 val actualSeq = seq and 0xFFFF
 
                 if (actualSeq != expectedSeq) {
-                    val lostCount = if (actualSeq > expectedSeq) {
-                        actualSeq - expectedSeq
+                    // Расстояние "вперёд" по модулю 2^16.
+                    val forwardDiff = (actualSeq - expectedSeq) and 0xFFFF
+                    if (forwardDiff < SEQ_HALF_RANGE) {
+                        // Реальный пропуск вперёд — потерянные пакеты.
+                        packetsLostTotal += forwardDiff
+                        currentBurst += forwardDiff
+                        maxBurst = max(maxBurst, currentBurst)
                     } else {
-                        actualSeq + 0x10000 - expectedSeq
-                    }
-
-                    packetsLostTotal += lostCount
-                    currentBurst += lostCount
-                    maxBurst = max(maxBurst, currentBurst)
-
-
-                    // Проверка на out-of-order
-                    if (actualSeq < lastSeq && (lastSeq - actualSeq) < 0x8000) {
+                        // Пакет пришёл позже (переупорядочивание/дубликат) — это не потеря.
                         outOfOrderTotal++
                     }
                 } else {
@@ -133,23 +124,22 @@ class RtpStats {
             } else {
                 firstPacket = false
             }
-
             lastSeq = seq
 
-            // Обновляем джиттер (RFC 3550)
-            if (lastRtpTimestamp != 0) {
-                val transitTime = arrivalTime - ((timestamp * 1000.0) / stats.clockRate)
+            // Джиттер (RFC 3550). timestampMs уже в мс, поэтому transit — тоже в мс.
+            val transitTime = (arrivalTime - timestampMs).toDouble()
+            if (transitInitialized) {
                 val d = transitTime - transit
-                transit = transitTime
-
-                jitter += JITTER_DECAY * (kotlin.math.abs(d) - jitter)
+                jitter += JITTER_DECAY * (abs(d) - jitter)
+            } else {
+                transitInitialized = true
             }
-            lastRtpTimestamp = timestamp.toInt()
-
+            transit = transitTime
+            lastRtpTimestamp = timestampMs.toInt()
             stats.currentRtpTimestamp = lastRtpTimestamp
             stats.jitterMs = jitter
 
-            // Обновляем packet gap
+            // Интервалы между пакетами
             if (lastPacketTime != 0L) {
                 val gapMs = (arrivalTime - lastPacketTime).toDouble()
                 gapSumMs += gapMs
@@ -159,50 +149,29 @@ class RtpStats {
             }
             lastPacketTime = arrivalTime
 
-            // Если это маркерный пакет (начало кадра)
+            // Маркер = последний пакет кадра
             if (marker) {
-                onFrameReceived(timestamp.toInt(), arrivalTime)
+                frameCount++
             }
         }
     }
 
-    private fun onFrameReceived(rtpTimestamp: Int, arrivalTime: Long) {
-        frameCount++
-        lastFrameArrival = arrivalTime
-
-        // Обновляем интервалы между кадрами для определения FPS
-        if (lastFrameTime != 0L) {
-            val intervalMs = (arrivalTime - lastFrameTime).toDouble()
-            frameIntervals.add(intervalMs)
-            if (frameIntervals.size > MAX_FRAME_INTERVALS) {
-                frameIntervals.removeAt(0)
-            }
-        }
-        val previousTime = lastFrameTime
-        val previousTimestamp = lastFrameTimestamp
-        lastFrameTime = arrivalTime
-        lastFrameTimestamp = rtpTimestamp
-
-        // Автоопределение clock rate
-        if (!clockRateLocked && frameIntervals.size >= 10) {
-            // Пытаемся определить clock rate по интервалам кадров
-            // Предполагаем, что интервал между кадрами в RTP timestamp примерно постоянен
-            if (previousTimestamp != 0 && rtpTimestamp != previousTimestamp) {
-                val rtpInterval = (rtpTimestamp - previousTimestamp) and 0xFFFFFFFFL.toInt()
-                val timeIntervalMs = (arrivalTime - previousTime).toDouble()
-                val estimatedClockRate = ((rtpInterval * 1000.0) / timeIntervalMs).toLong()
-                
-                // Если оценка близка к стандартным значениям, используем её
-                if (estimatedClockRate in 8000..90000) {
-                    stats.clockRate = estimatedClockRate
-                    clockRateLocked = true
-                    Log.i("RtpStats", "Clock rate auto-detected: $estimatedClockRate")
-                }
-            }
+    /**
+     * Учёт видеоданных (размер собранного NAL-юнита) для метрики видеобитрейта.
+     */
+    fun onVideoNalUnit(size: Int) {
+        synchronized(queueMutex) {
+            byteCount += size
         }
     }
 
-
+    /**
+     * @deprecated Используйте [onRtpPacket] для сетевых метрик и [onVideoNalUnit] для видеобитрейта.
+     */
+    @Deprecated("Use onRtpPacket(...) for network stats and onVideoNalUnit(...) for video bitrate")
+    fun onPacket(size: Int, timestamp: Long, seq: Int, marker: Boolean) {
+        onRtpPacket(size, timestamp, seq, marker)
+    }
 
     fun calculateStats() {
         synchronized(queueMutex) {
@@ -215,85 +184,74 @@ class RtpStats {
             lastCalculationTime = currentTime
             val timeDiffSec = timeDiffMs / 1000.0
 
-            // Рассчитываем FPS
+            // FPS
             stats.fps = (frameCount - lastFrameCount) / timeDiffSec
             lastFrameCount = frameCount
 
-            // Рассчитываем bitrate (используем степени двойки для двоичных кратных: 1 MiB = 1048576 байт)
+            // Видеобитрейт (по собранным NAL-юнитам)
             stats.bitrateMbps = (byteCount * 8.0 / (timeDiffSec * 1_048_576))
             byteCount = 0
 
-            // Рассчитываем input bitrate (используем степени двойки для двоичных кратных)
+            // Входной (сетевой) битрейт (по RTP-пакетам)
             stats.inputBitrateMbps = (stats.bytesReceived * 8.0 / (timeDiffSec * 1_048_576))
             stats.bytesReceived = 0
 
-            // Рассчитываем packet gap
+            // Packet gap
             if (gapCount > 0) {
                 stats.packetGapAvgMs = gapSumMs / gapCount
                 stats.packetGapMaxMs = gapMaxMs
                 stats.packetGapMinMs = if (gapMinMs == Double.MAX_VALUE) 0.0 else gapMinMs
             }
 
-            // Рассчитываем сетевые метрики
+            // Накопительные сетевые метрики
             stats.packetsLost = packetsLostTotal
-            stats.packetLossPercent = if (totalPacketsReceived > 0) {
-                (packetsLostTotal * 100.0 / totalPacketsReceived)
-            } else 0.0
+            val totalSeen = packetsLostTotal + totalPacketsReceived
+            stats.packetLossPercent = if (totalSeen > 0) {
+                packetsLostTotal * 100.0 / totalSeen
+            } else {
+                0.0
+            }
             stats.outOfOrderPackets = outOfOrderTotal
             stats.maxBurstLoss = maxBurst
 
-            // Очищаем временные данные
+            // Сбрасываем только интервальные счётчики
             gapCount = 0
             gapSumMs = 0.0
             gapMaxMs = 0.0
             gapMinMs = Double.MAX_VALUE
-
-            // Сбрасываем счётчики для следующего интервала
-            packetsLostTotal = 0
-            outOfOrderTotal = 0
-            currentBurst = 0
         }
     }
 
+    /**
+     * Вызывается перед постановкой кадра в декодер.
+     * [timestampMs] — RTP-время кадра, по нему результат декодирования сопоставляется с push.
+     */
+    fun onFramePushed(timestampMs: Long) {
+        synchronized(queueMutex) {
+            if (framePushTimes.size >= MAX_LATENCY_SAMPLES) framePushTimes.clear()
+            framePushTimes[timestampMs] = System.currentTimeMillis()
+        }
+    }
+
+    @Deprecated("Use onFramePushed(timestampMs)")
     fun onFramePushed() {
-        synchronized(queueMutex) {
-            framePushedTime = System.currentTimeMillis()
-            val currentRtpTimestamp = stats.currentRtpTimestamp
-            
-            // Сохраняем точку синхронизации
-            val syncPoint = SyncPoint(
-                networkTime = framePushedTime,
-                decodeTime = 0,
-                rtpTimestamp = currentRtpTimestamp
-            )
-            syncPoints.add(syncPoint)
-            if (syncPoints.size > maxSyncPoints) {
-                syncPoints.removeAt(0)
-            }
-        }
+        onFramePushed(stats.currentRtpTimestamp.toLong())
     }
 
-    fun onFrameDecoded(decodeTime: Long) {
+    /**
+     * Вызывается после декодирования кадра. [timestampMs] должен совпадать со значением,
+     * переданным в [onFramePushed] (presentation timestamp декодера).
+     *
+     * Считается задержка «постановка в декодер -> готовый кадр». Сетевую задержку без
+     * синхронизации часов с сервером (RTCP SR / NTP) измерить невозможно, поэтому
+     * [Stats.networkLatencyMs] остаётся 0, а [Stats.totalLatencyMs] равен задержке декодирования.
+     */
+    fun onFrameDecoded(timestampMs: Long) {
         synchronized(queueMutex) {
-            // Находим последнюю точку синхронизации
-            val syncPoint = syncPoints.lastOrNull()
-            if (syncPoint != null) {
-                // Обновляем статистику задержки
-                val networkLatency = System.currentTimeMillis() - syncPoint.networkTime
-                val decodeLatency = decodeTime - syncPoint.networkTime
-                
-                stats.networkLatencyMs = networkLatency.toDouble()
-                stats.decodeLatencyMs = decodeLatency.toDouble()
-                stats.totalLatencyMs = (networkLatency + decodeLatency).toDouble()
-                
-                // Обновляем точку синхронизации
-                val updatedSyncPoint = syncPoint.copy(decodeTime = decodeTime)
-                val index = syncPoints.indexOf(syncPoint)
-                if (index >= 0) {
-                    syncPoints[index] = updatedSyncPoint
-                }
-            }
-
+            val pushTime = framePushTimes.remove(timestampMs) ?: return
+            val decodeLatency = (System.currentTimeMillis() - pushTime).toDouble()
+            stats.decodeLatencyMs = decodeLatency
+            stats.totalLatencyMs = decodeLatency
         }
     }
 
@@ -307,33 +265,31 @@ class RtpStats {
      */
     fun reset() {
         synchronized(queueMutex) {
-            frameIntervals.clear()
-            syncPoints.clear()
-            
+            framePushTimes.clear()
+
             jitter = 0.0
+            transit = 0.0
+            transitInitialized = false
             lastRtpTimestamp = 0
-            lastFrameTime = 0
-            lastFrameTimestamp = 0
-            clockRateLocked = false
             frameCount = 0L
             byteCount = 0L
             lastFrameCount = 0L
             lastPacketTime = 0L
             lastCalculationTime = 0L
-            
+
             gapCount = 0L
             gapSumMs = 0.0
             gapMaxMs = 0.0
             gapMinMs = Double.MAX_VALUE
-            
+
             lastSeq = 0
+            firstPacket = true
             packetsLostTotal = 0
             outOfOrderTotal = 0
             currentBurst = 0
             maxBurst = 0
-            firstPacket = true
             totalPacketsReceived = 0L
-            
+
             stats.apply {
                 fps = 0.0
                 bitrateMbps = 0.0

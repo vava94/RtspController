@@ -33,6 +33,14 @@ class RtspClient private constructor(builder: Builder) {
         fun onRtspConnecting()
         fun onRtspConnected(sdpInfo: SdpInfo)
         fun onRtspVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long, seq: Int, marker: Boolean)
+
+        /**
+         * Вызывается для каждого принятого видеопакета RTP (до сборки NAL-юнитов).
+         * Нужен для корректной сетевой статистики (потери/джиттер/входной битрейт).
+         * По умолчанию ничего не делает — существующие реализации не ломаются.
+         */
+        fun onRtspRtpPacketReceived(size: Int, timestampMs: Long, seq: Int, marker: Boolean) {}
+
         fun onRtspAudioSampleReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long)
         fun onRtspApplicationDataReceived(
             data: ByteArray,
@@ -809,6 +817,14 @@ class RtspClient private constructor(builder: Builder) {
 
                 // Video
                 if (sdpInfo.videoTrack != null && header.payloadType == sdpInfo.videoTrack!!.payloadType) {
+
+                    // Сетевые метрики — на каждый RTP-пакет (до сборки NAL).
+                    listener.onRtspRtpPacketReceived(
+                        header.payloadSize,
+                        header.timestampMs,
+                        header.sequenceNumber,
+                        header.marker == 1
+                    )
 
                     if (videoSeqNum > header.sequenceNumber) {
                         Log.w(

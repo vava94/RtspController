@@ -24,6 +24,9 @@ class RtspController(
     companion object {
         val TAG = RtspController::class.java.simpleName
         val DEBUG = BuildConfig.DEBUG
+
+        /** Payload type по умолчанию для RTP-режима (динамический диапазон 96–127). */
+        const val DEFAULT_RTP_PAYLOAD_TYPE = 96
     }
 
     interface RtspControllerCallbacks{
@@ -118,7 +121,7 @@ class RtspController(
     fun initRtp(
         bindAddress: String,
         port: UShort,
-        payloadType: Int,
+        payloadType: Int = DEFAULT_RTP_PAYLOAD_TYPE,
         videoCodec: VideoCodec = this.videoCodec
     ): Boolean {
         if (mode != OPERATION_MODE.RTP) {
@@ -229,6 +232,11 @@ class RtspController(
 
         override fun onRtpServerStarted() {
             Log.i(TAG, "RTP server started successfully")
+        }
+
+        override fun onRtpPacketReceived(seq: Int, timestampMs: Long, payloadSize: Int, marker: Boolean) {
+            // Сетевые метрики считаем на каждый RTP-пакет (потери/джиттер/входной битрейт).
+            mRtspProcessor?.onRtpPacketReceived(payloadSize, timestampMs, seq, marker)
         }
 
         override fun onRtpVideoNalUnitReceived(data: ByteArray, offset: Int, length: Int, timestamp: Long) {

@@ -350,8 +350,9 @@ abstract class VideoDecodeThread (
                                     (MediaCodec.BUFFER_FLAG_KEY_FRAME /*or MediaCodec.BUFFER_FLAG_CODEC_CONFIG*/) else 0
                                 decoder.queueInputBuffer(inIndex, frame.offset, frame.length, frame.timestampMs, flags)
 
-                                // Notify RTP stats about frame push
-                                rtpStats?.onFramePushed()
+                                // Notify RTP stats about frame push (timestamp нужен для сопоставления
+                                // с результатом декодирования и расчёта задержки).
+                                rtpStats?.onFramePushed(frame.timestampMs)
 
                                 if (frame.isKeyframe) {
                                     // Obtain width and height from stream
