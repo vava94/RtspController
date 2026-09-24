@@ -63,10 +63,9 @@ class RtpServer {
     // Парсеры
     private lateinit var videoParser: RtpParser
 
-    // Переиспользуемые буферы (обработка однопоточная — можно не аллоцировать на каждый пакет).
-    // Растут лениво до нужного размера.
+    // Переиспользуемый буфер пакета (обработка однопоточная — можно не аллоцировать на каждый
+    // пакет). Растёт лениво до нужного размера. Payload парсится прямо из него по offset.
     private var packetBuffer = ByteArray(0)
-    private var payloadBuffer = ByteArray(0)
 
     // Статистика
     private var packetsReceived = 0L
@@ -238,27 +237,25 @@ class RtpServer {
             return
         }
 
-        // Переиспользуемый буфер payload вместо copyOfRange (0 аллокаций на пакет)
-        if (payloadBuffer.size < payloadSize) payloadBuffer = ByteArray(payloadSize)
-        System.arraycopy(data, payloadStart, payloadBuffer, 0, payloadSize)
-
         if (debug) {
             Log.d(TAG_DEBUG, "RTP Packet: headerSize=$payloadStart, payloadSize=$payloadSize, " +
                     "marker=${header.marker}, seq=${header.sequenceNumber}")
 
             if (payloadSize > 0) {
-                val firstByte = payloadBuffer[0]
+                val firstByte = data[payloadStart]
                 val nalType: Int = (firstByte.toInt() shr 1) and 0x3F
                 val preview = (0 until minOf(4, payloadSize)).joinToString(" ") {
-                    "%02x".format(payloadBuffer[it])
+                    "%02x".format(data[payloadStart + it])
                 }
                 Log.d(TAG_DEBUG, "NAL type: $nalType, first bytes: $preview")
             }
         }
 
-        // Используем RtpParser для обработки всех кодеков (H.264 и H.265)
+        // Используем RtpParser для обработки всех кодеков (H.264 и H.265).
+        // Payload передаём по offset прямо из буфера пакета — без копирования.
         val nalUnit = parser.processRtpPacketAndGetNalUnit(
-            payloadBuffer,
+            data,
+            payloadStart,
             payloadSize,
             header.marker == 1
         )

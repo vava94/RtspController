@@ -238,6 +238,8 @@ Hot-path optimizations (all allocation-free per packet/frame):
 
 - **`memcmp` (both `RtspClient` and `VideoCodecUtils`)** compares by index instead of `sliceArray`. This was the dominant allocation source: it is called for every byte position while searching for a NAL start code (thousands of arrays per keyframe check).
 - **`RtspClient` input is wrapped in a `BufferedInputStream`** (16 KiB), so `readLine`/`readUntilBytesFound`/`readData` no longer issue a syscall per byte.
-- **`RtpServer`** parses the datagram and payload from reusable buffers (`packetBuffer`, `payloadBuffer`) instead of per-packet `copyOfRange`, and sets a 4 MiB socket `receiveBufferSize` to survive bitrate bursts.
+- **`RtpServer`** parses the datagram from a reusable `packetBuffer` instead of per-packet `copyOfRange`, and sets a 4 MiB socket `receiveBufferSize` to survive bitrate bursts.
+- **`RtpParser`** gained an offset overload (`processRtpPacketAndGetNalUnit(data, offset, length, marker)`), so both `RtpServer` and `RtspClient` depacketize the payload in place — no intermediate payload copy.
+- **`VideoCodecUtils.searchForNalUnitStart`** no longer needs an `AtomicInteger` out-parameter; callers use `getNalUnitPrefixSize(...)` (the old overload is kept as deprecated for compatibility).
 - **`RtpStats`** no longer keeps an unused per-packet `PacketInfo` history (which caused one allocation per packet plus an `O(n)` `removeAt(0)`).
 - Debug logging is fully compiled out when `BuildConfig.DEBUG == false`; no functional path depends on the flag.

@@ -8,11 +8,16 @@ import com.catanddev.rtsp.utils.VideoCodecUtils.getH264NalUnitTypeString
 
 class RtpH264Parser: RtpParser() {
 
-    override fun processRtpPacketAndGetNalUnit(data: ByteArray, length: Int, marker: Boolean): ByteArray? {
-        if (DEBUG) Log.v(TAG, "processRtpPacketAndGetNalUnit(data.size=${data.size}, length=$length, marker=$marker)")
+    override fun processRtpPacketAndGetNalUnit(
+        data: ByteArray,
+        offset: Int,
+        length: Int,
+        marker: Boolean
+    ): ByteArray? {
+        if (DEBUG) Log.v(TAG, "processRtpPacketAndGetNalUnit(data.size=${data.size}, offset=$offset, length=$length, marker=$marker)")
 
-        val nalType = (data[0].toInt() and 0x1F).toByte()
-        val packFlag = data[1].toInt() and 0xC0
+        val nalType = (data[offset].toInt() and 0x1F).toByte()
+        val packFlag = data[offset + 1].toInt() and 0xC0
         var nalUnit: ByteArray? = null
 
         if (DEBUG)
@@ -30,21 +35,21 @@ class RtpH264Parser: RtpParser() {
             VideoCodecUtils.NAL_FU_A -> {
                 when (packFlag) {
                     0x80 -> {
-                        addStartFragmentedPacket(data, length)
+                        addStartFragmentedPacket(data, offset, length)
                     }
 
                     0x00 -> {
                         if (marker) {
                             // Sometimes 0x40 end packet is not arrived. Use marker bit in this case
                             // to finish fragmented packet.
-                            nalUnit = addEndFragmentedPacketAndCombine(data, length)
+                            nalUnit = addEndFragmentedPacketAndCombine(data, offset, length)
                         } else {
-                            addMiddleFragmentedPacket(data, length)
+                            addMiddleFragmentedPacket(data, offset, length)
                         }
                     }
 
                     0x40 -> {
-                        nalUnit = addEndFragmentedPacketAndCombine(data, length)
+                        nalUnit = addEndFragmentedPacketAndCombine(data, offset, length)
                     }
                 }
             }
@@ -54,7 +59,7 @@ class RtpH264Parser: RtpParser() {
             }
 
             else -> {
-                nalUnit = processSingleFramePacket(data, length)
+                nalUnit = processSingleFramePacket(data, offset, length)
                 clearFragmentedBuffer()
                 if (DEBUG) Log.d(TAG, "Single NAL (${nalUnit.size})")
             }
@@ -62,18 +67,18 @@ class RtpH264Parser: RtpParser() {
         return nalUnit
     }
 
-    private fun addStartFragmentedPacket(data: ByteArray, length: Int) {
-        if (DEBUG) Log.v(TAG, "addStartFragmentedPacket(data.size=${data.size}, length=$length)")
+    private fun addStartFragmentedPacket(data: ByteArray, offset: Int, length: Int) {
+        if (DEBUG) Log.v(TAG, "addStartFragmentedPacket(data.size=${data.size}, offset=$offset, length=$length)")
         fragmentedPackets = 0
         fragmentedBufferLength = length - 1
         fragmentedBuffer[0] = ByteArray(fragmentedBufferLength).apply {
-            this[0] = ((data[0].toInt() and 0xE0) or (data[1].toInt() and 0x1F)).toByte()
+            this[0] = ((data[offset].toInt() and 0xE0) or (data[offset + 1].toInt() and 0x1F)).toByte()
         }
-        System.arraycopy(data, 2, fragmentedBuffer[0]!!, 1, length - 2)
+        System.arraycopy(data, offset + 2, fragmentedBuffer[0]!!, 1, length - 2)
     }
 
-    private fun addMiddleFragmentedPacket(data: ByteArray, length: Int) {
-        if (DEBUG) Log.v(TAG, "addMiddleFragmentedPacket(data.size=${data.size}, length=$length)")
+    private fun addMiddleFragmentedPacket(data: ByteArray, offset: Int, length: Int) {
+        if (DEBUG) Log.v(TAG, "addMiddleFragmentedPacket(data.size=${data.size}, offset=$offset, length=$length)")
         fragmentedPackets++
         if (fragmentedPackets >= fragmentedBuffer.size) {
             Log.e(TAG, "Too many middle packets. No NAL FU_A end packet received. Skipped RTP packet.")
@@ -81,12 +86,12 @@ class RtpH264Parser: RtpParser() {
         } else {
             fragmentedBufferLength += length - 2
             fragmentedBuffer[fragmentedPackets] = ByteArray(length - 2)
-            System.arraycopy(data, 2, fragmentedBuffer[fragmentedPackets]!!, 0, length - 2)
+            System.arraycopy(data, offset + 2, fragmentedBuffer[fragmentedPackets]!!, 0, length - 2)
         }
     }
 
-    private fun addEndFragmentedPacketAndCombine(data: ByteArray, length: Int): ByteArray? {
-        if (DEBUG) Log.v(TAG, "addEndFragmentedPacketAndCombine(data.size=${data.size}, length=$length)")
+    private fun addEndFragmentedPacketAndCombine(data: ByteArray, offset: Int, length: Int): ByteArray? {
+        if (DEBUG) Log.v(TAG, "addEndFragmentedPacketAndCombine(data.size=${data.size}, offset=$offset, length=$length)")
         var nalUnit: ByteArray? = null
         var tmpLen: Int
         if (fragmentedBuffer[0] == null) {
@@ -109,7 +114,7 @@ class RtpH264Parser: RtpParser() {
                 }
             }
             // Write end packet
-            System.arraycopy(data, 2, nalUnit, tmpLen, length - 2)
+            System.arraycopy(data, offset + 2, nalUnit, tmpLen, length - 2)
             clearFragmentedBuffer()
             if (DEBUG) Log.d(TAG, "Fragmented NAL (${nalUnit.size})")
         }

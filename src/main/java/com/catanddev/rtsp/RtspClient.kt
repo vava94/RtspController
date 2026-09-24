@@ -820,16 +820,18 @@ class RtspClient private constructor(builder: Builder) {
                     videoSeqNum = header.sequenceNumber
                     val nalUnit: ByteArray?
 
-                    // If extendion bit set in header, skip extension data
+                    // If extension bit set in header, skip extension data.
+                    // Payload передаём по offset — без копирования в промежуточный массив.
                     if (header.extension == 1) {
                         val skipBytes = (data[2].toInt() shl 8 or data[3].toInt()) * 4 + 4
                         nalUnit = videoParser.processRtpPacketAndGetNalUnit(
-                            data.copyOfRange(skipBytes, data.size),
+                            data, skipBytes,
                             header.payloadSize - skipBytes, header.marker == 1
                         )
                     } else {
                         nalUnit = videoParser.processRtpPacketAndGetNalUnit(
                             data,
+                            0,
                             header.payloadSize,
                             header.marker == 1
                         )
